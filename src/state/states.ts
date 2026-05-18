@@ -1,5 +1,5 @@
 import { AppState, AppEvent } from "../types/events";
-import type { TransitionMap } from "../types/events";
+import type { TransitionMap, WorkerInboundMessage, WorkerOutboundMessage } from "../types/events";
 import { StateMachine } from "./machine";
 import type { CameraResult, CameraError } from "../camera/stream";
 import { requestCameraStreamWithFallback, stopCameraStream, createHiddenVideoElement } from "../camera/stream";
@@ -9,6 +9,7 @@ import { showPermissionDenied, showCameraError } from "../ui/shared/permission";
 import { showSplash } from "../ui/splash";
 import { showLoadingProgress, showDownloadError } from "../ui/loading";
 import { downloadModel } from "../loader";
+import { FrameCapture } from "../camera/frame";
 
 /** Transition map for the app state machine. */
 export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
@@ -44,8 +45,11 @@ export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
 };
 
 let currentStream: MediaStream | null = null
+let captureVideo: HTMLVideoElement | null = null
 let sceneContext: SceneContext | null = null
 let stopRenderLoopFn: (() => void) | null = null
+let frameCapture: FrameCapture | null = null
+let frameWorker: Worker | null = null
 
 export function setSceneContext(ctx: SceneContext): void {
   sceneContext = ctx
@@ -103,6 +107,7 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
 
     currentStream = cam.stream;
     const video = createHiddenVideoElement(cam.stream);
+    captureVideo = video;
     await video.play();
     if (sceneContext) {
       createVideoBackground(sceneContext.scene, video);
@@ -120,9 +125,37 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
     if (sceneContext) {
       container.appendChild(sceneContext.renderer.domElement);
     }
+    if (captureVideo) {
+      const capture = new FrameCapture(captureVideo);
+      const worker = new Worker(
+        new URL('../worker/index.ts', import.meta.url),
+        { type: 'module' }
+      );
+      worker.onmessage = (event: MessageEvent<WorkerInboundMessage>) => {
+        try {
+          const msg = event.data;
+          if (msg.type === 'FRAME_ACK') {
+            capture.onFrameAck();
+          }
+        } catch (err) {
+          console.error('Worker message handler error:', err);
+        }
+      };
+      capture.startWithWorker(worker);
+      frameCapture = capture;
+      frameWorker = worker;
+    }
   });
-  fsm.onExit(AppState.Camera, () => {
+  fsm.onExit(AppState.Camera, (next: AppState) => {
+    if (next === AppState.Tracking) return
     stopRenderLoopFn?.();
+    frameCapture?.stop();
+    frameCapture = null;
+    if (frameWorker) {
+      const terminateMsg: WorkerOutboundMessage = { type: 'TERMINATE' };
+      frameWorker.postMessage(terminateMsg);
+      frameWorker = null;
+    }
     if (currentStream) {
       stopCameraStream(currentStream);
       currentStream = null;
@@ -137,13 +170,23 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
   });
 
   fsm.onEnter(AppState.Lost, () => {
-    // mountLostUI()
+    frameCapture?.stop();
   });
-  fsm.onExit(AppState.Lost, () => {
-    // unmountLostUI()
+  fsm.onExit(AppState.Lost, (next: AppState) => {
+    if (next !== AppState.Tracking) return
+    if (frameCapture && frameWorker) {
+      frameCapture.startWithWorker(frameWorker);
+    }
   });
 
   fsm.onEnter(AppState.Error, () => {
+    frameCapture?.stop();
+    if (frameWorker) {
+      const terminateMsg: WorkerOutboundMessage = { type: 'TERMINATE' };
+      frameWorker.postMessage(terminateMsg);
+      frameWorker = null;
+    }
+    frameCapture = null;
     showDownloadError(container, () => {
       fsm.dispatch(AppEvent.RETRY);
     });

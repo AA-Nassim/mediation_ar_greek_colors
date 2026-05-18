@@ -1,4 +1,5 @@
 import { FRAME_CAPTURE_INTERVAL_MS } from '../config'
+import type { WorkerOutboundMessage } from '../types/events'
 
 export type FrameData = {
   width: number
@@ -11,6 +12,9 @@ export class FrameCapture {
   #canvas: OffscreenCanvas | HTMLCanvasElement | null = null
   #ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null
   #intervalId: ReturnType<typeof setInterval> | null = null
+  #worker: Worker | null = null
+  #awaitingAck = false
+  #frameId = 0
 
   constructor(video: HTMLVideoElement) {
     this.#video = video
@@ -48,11 +52,35 @@ export class FrameCapture {
     }, FRAME_CAPTURE_INTERVAL_MS)
   }
 
+  startWithWorker(worker: Worker): void {
+    this.#worker = worker
+    this.#frameId = 0
+    if (this.#intervalId !== null) return
+    this.#intervalId = setInterval(() => {
+      if (this.#awaitingAck) return
+      const frame = this.capture()
+      if (frame === null) return
+      const frameId = this.#frameId
+      const msg: WorkerOutboundMessage = {
+        type: 'FRAME_DATA',
+        payload: { frameId, width: frame.width, height: frame.height, data: frame.data },
+      }
+      this.#awaitingAck = true
+      worker.postMessage(msg, [frame.data])
+      this.#frameId++
+    }, FRAME_CAPTURE_INTERVAL_MS)
+  }
+
+  onFrameAck(): void {
+    this.#awaitingAck = false
+  }
+
   stop(): void {
     if (this.#intervalId !== null) {
       clearInterval(this.#intervalId)
       this.#intervalId = null
     }
+    this.#awaitingAck = false
   }
 
   #initCanvas(width: number, height: number): void {

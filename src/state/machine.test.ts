@@ -1,8 +1,69 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { StateMachine } from "./machine";
 import { createAppStateMachine, APP_TRANSITIONS } from "./states";
 import { AppState, AppEvent } from "../types/events";
 import type { TransitionMap } from "../types/events";
+
+let currentMockWorker: Worker | null = null
+let workerConstructorCalls = 0
+
+beforeAll(() => {
+  const mockCtx = {
+    drawImage: vi.fn(),
+    getImageData: vi.fn(() => ({
+      data: { buffer: new ArrayBuffer(640 * 480 * 4) },
+    })),
+  }
+  class MockOffscreenCanvas {
+    width = 640; height = 480
+    getContext() { return mockCtx }
+  }
+  vi.stubGlobal('OffscreenCanvas', MockOffscreenCanvas)
+
+  function MockWorkerFactory() {
+    workerConstructorCalls++
+    return (currentMockWorker ?? {
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+      onmessage: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      onmessageerror: null,
+    }) as unknown as Worker
+  }
+
+  vi.stubGlobal('Worker', MockWorkerFactory as unknown as typeof Worker)
+})
+
+afterAll(() => {
+  vi.unstubAllGlobals()
+})
+
+vi.mock("../loader", () => ({
+  downloadModel: vi.fn(() => Promise.resolve(undefined)),
+}));
+
+vi.mock("../camera/stream", async (importOriginal) => {
+  const actual = await importOriginal() as typeof import("../camera/stream");
+  return {
+    ...actual,
+    requestCameraStreamWithFallback: vi.fn(() =>
+      Promise.resolve({
+        stream: { getVideoTracks: () => [], getTracks: () => [] } as unknown as MediaStream,
+        source: "userMedia" as const,
+      })
+    ),
+    createHiddenVideoElement: vi.fn(() => {
+      const video = document.createElement("video");
+      Object.defineProperties(video, {
+        videoWidth: { get: () => 640 },
+        videoHeight: { get: () => 480 },
+      });
+      return video;
+    }),
+  };
+});
 
 describe("StateMachine", () => {
   type TestState = "idle" | "running" | "stopped";
@@ -276,6 +337,89 @@ describe("AppStateMachine", () => {
       appFsm.dispatch(AppEvent.MODEL_LOADED);
       // Hooks are registered and execute without throwing
       expect(appFsm.state).toBe(AppState.Camera);
+    });
+  });
+
+  describe("worker lifecycle (Story 1.5)", () => {
+    let mockWorker: Worker;
+
+    function createTrackedWorker() {
+      return {
+        postMessage: vi.fn((_msg: unknown, transfer?: Transferable[]) => {
+          if (transfer) {
+            for (const t of transfer) {
+              if (t instanceof ArrayBuffer) {
+                Object.defineProperty(t, 'byteLength', { value: 0 });
+              }
+            }
+          }
+        }),
+        terminate: vi.fn(),
+        onmessage: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+        onmessageerror: null,
+      } as unknown as Worker;
+    }
+
+    beforeEach(() => {
+      mockWorker = createTrackedWorker();
+      currentMockWorker = mockWorker;
+    });
+
+    afterEach(() => {
+      currentMockWorker = null;
+    });
+
+    async function waitForCamera(fsm: StateMachine<AppState, AppEvent>): Promise<void> {
+      if (fsm.state === AppState.Camera) return;
+      await vi.waitFor(() => {
+        expect(fsm.state).toBe(AppState.Camera);
+      }, { timeout: 2000, interval: 10 });
+    }
+
+    it("Error state terminates worker and capture stops", async () => {
+      const appFsm = createAppStateMachine(createMockContainer());
+      await waitForCamera(appFsm);
+
+      appFsm.dispatch(AppEvent.FATAL_ERROR);
+      expect(appFsm.state).toBe(AppState.Error);
+
+      expect(mockWorker.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'TERMINATE' })
+      );
+    });
+
+    it("Lost state pauses capture but keeps worker alive", async () => {
+      const appFsm = createAppStateMachine(createMockContainer());
+      await waitForCamera(appFsm);
+
+      appFsm.dispatch(AppEvent.STATUE_DETECTED);
+      expect(appFsm.state).toBe(AppState.Tracking);
+
+      appFsm.dispatch(AppEvent.TRACKING_LOST);
+      expect(appFsm.state).toBe(AppState.Lost);
+
+      expect(mockWorker.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'TERMINATE' })
+      );
+    });
+
+    it("RETRY from Error re-enters Loading then Camera creates new worker", async () => {
+      workerConstructorCalls = 0;
+      const appFsm = createAppStateMachine(createMockContainer());
+      await waitForCamera(appFsm);
+      expect(workerConstructorCalls).toBe(1);
+
+      appFsm.dispatch(AppEvent.FATAL_ERROR);
+      expect(appFsm.state).toBe(AppState.Error);
+
+      appFsm.dispatch(AppEvent.RETRY);
+      await vi.waitFor(() => {
+        expect(appFsm.state).toBe(AppState.Camera);
+      }, { timeout: 2000, interval: 10 });
+      expect(workerConstructorCalls).toBe(2);
     });
   });
 });

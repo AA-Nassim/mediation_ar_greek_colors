@@ -62,3 +62,21 @@ export type TransitionMap<S extends string, E extends string> = Record<
   S,
   Partial<Record<E, S>>
 >;
+
+// --- Web Worker Message Types ---
+
+export type RawInferenceOutput = {
+  detected: boolean;
+  confidence: number;
+  bbox?: { x: number; y: number; width: number; height: number };
+};
+
+export type WorkerOutboundMessage =
+  | { type: 'FRAME_DATA'; payload: { frameId: number; width: number; height: number; data: ArrayBuffer } }
+  | { type: 'TERMINATE' };
+
+export type WorkerInboundMessage =
+  | { type: 'WORKER_READY' }
+  | { type: 'FRAME_ACK'; payload: { frameId: number } }
+  | { type: 'INFERENCE_RESULT'; payload: RawInferenceOutput }
+  | { type: 'INFERENCE_ERROR'; payload: { message: string; code: string } };

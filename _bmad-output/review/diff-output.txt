@@ -1,0 +1,360 @@
+﻿git : warning: in the working copy of 'src/camera/frame.ts', LF will be replaced by CRLF the next time Git touches it
+At line:1 char:1
++ git diff 939d62094cbaa36d21c3a891a995235fa24a9364 -- src/ 2>&1 | Out- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: in the... Git touches it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: in the working copy of 'src/state/machine.test.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/state/states.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/types/events.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/types/index.ts', LF will be replaced by CRLF the next time Git touches it
+diff --git a/src/camera/frame.ts b/src/camera/frame.ts
+index 332c004..a15d4ae 100644
+--- a/src/camera/frame.ts
++++ b/src/camera/frame.ts
+@@ -1,4 +1,5 @@
+ import { FRAME_CAPTURE_INTERVAL_MS } from '../config'
++import type { WorkerOutboundMessage } from '../types/events'
+ 
+ export type FrameData = {
+   width: number
+@@ -11,6 +12,9 @@ export class FrameCapture {
+   #canvas: OffscreenCanvas | HTMLCanvasElement | null = null
+   #ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null
+   #intervalId: ReturnType<typeof setInterval> | null = null
++  #worker: Worker | null = null
++  #awaitingAck = false
++  #frameId = 0
+ 
+   constructor(video: HTMLVideoElement) {
+     this.#video = video
+@@ -48,11 +52,35 @@ export class FrameCapture {
+     }, FRAME_CAPTURE_INTERVAL_MS)
+   }
+ 
++  startWithWorker(worker: Worker, onAck?: (frameId: number) => void): void {
++    this.#worker = worker
++    this.#frameId = 0
++    if (this.#intervalId !== null) return
++    this.#intervalId = setInterval(() => {
++      if (this.#awaitingAck) return
++      const frame = this.capture()
++      if (frame === null) return
++      const msg: WorkerOutboundMessage = {
++        type: 'FRAME_DATA',
++        payload: { frameId: this.#frameId, width: frame.width, height: frame.height, data: frame.data },
++      }
++      this.#awaitingAck = true
++      worker.postMessage(msg, [frame.data])
++      this.#frameId++
++      onAck?.(this.#frameId)
++    }, FRAME_CAPTURE_INTERVAL_MS)
++  }
++
++  onFrameAck(): void {
++    this.#awaitingAck = false
++  }
++
+   stop(): void {
+     if (this.#intervalId !== null) {
+       clearInterval(this.#intervalId)
+       this.#intervalId = null
+     }
++    this.#awaitingAck = false
+   }
+ 
+   #initCanvas(width: number, height: number): void {
+diff --git a/src/state/machine.test.ts b/src/state/machine.test.ts
+index 77fcf0c..74e6eec 100644
+--- a/src/state/machine.test.ts
++++ b/src/state/machine.test.ts
+@@ -1,9 +1,66 @@
+-import { describe, it, expect, vi, beforeEach } from "vitest";
++import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
+ import { StateMachine } from "./machine";
+ import { createAppStateMachine, APP_TRANSITIONS } from "./states";
+ import { AppState, AppEvent } from "../types/events";
+ import type { TransitionMap } from "../types/events";
+ 
++let currentMockWorker: Worker | null = null
++let workerConstructorCalls = 0
++
++beforeAll(() => {
++  const mockCtx = {
++    drawImage: vi.fn(),
++    getImageData: vi.fn(() => ({
++      data: { buffer: new ArrayBuffer(640 * 480 * 4) },
++    })),
++  }
++  class MockOffscreenCanvas {
++    width = 640; height = 480
++    getContext() { return mockCtx }
++  }
++  vi.stubGlobal('OffscreenCanvas', MockOffscreenCanvas)
++
++  function MockWorkerFactory() {
++    workerConstructorCalls++
++    return (currentMockWorker ?? {
++      postMessage: vi.fn(),
++      terminate: vi.fn(),
++      onmessage: null,
++      addEventListener: vi.fn(),
++      removeEventListener: vi.fn(),
++      dispatchEvent: vi.fn(),
++      onmessageerror: null,
++    }) as unknown as Worker
++  }
++
++  vi.stubGlobal('Worker', MockWorkerFactory as unknown as typeof Worker)
++})
++
++vi.mock("../loader", () => ({
++  downloadModel: vi.fn(() => Promise.resolve(undefined)),
++}));
++
++vi.mock("../camera/stream", async (importOriginal) => {
++  const actual = await importOriginal() as typeof import("../camera/stream");
++  return {
++    ...actual,
++    requestCameraStreamWithFallback: vi.fn(() =>
++      Promise.resolve({
++        stream: { getVideoTracks: () => [], getTracks: () => [] } as unknown as MediaStream,
++        source: "userMedia" as const,
++      })
++    ),
++    createHiddenVideoElement: vi.fn(() => {
++      const video = document.createElement("video");
++      Object.defineProperties(video, {
++        videoWidth: { get: () => 640 },
++        videoHeight: { get: () => 480 },
++      });
++      return video;
++    }),
++  };
++});
++
+ describe("StateMachine", () => {
+   type TestState = "idle" | "running" | "stopped";
+   type TestEvent = "START" | "STOP" | "RESET";
+@@ -278,4 +335,87 @@ describe("AppStateMachine", () => {
+       expect(appFsm.state).toBe(AppState.Camera);
+     });
+   });
++
++  describe("worker lifecycle (Story 1.5)", () => {
++    let mockWorker: Worker;
++
++    function createTrackedWorker() {
++      return {
++        postMessage: vi.fn((_msg: unknown, transfer?: Transferable[]) => {
++          if (transfer) {
++            for (const t of transfer) {
++              if (t instanceof ArrayBuffer) {
++                Object.defineProperty(t, 'byteLength', { value: 0 });
++              }
++            }
++          }
++        }),
++        terminate: vi.fn(),
++        onmessage: null,
++        addEventListener: vi.fn(),
++        removeEventListener: vi.fn(),
++        dispatchEvent: vi.fn(),
++        onmessageerror: null,
++      } as unknown as Worker;
++    }
++
++    beforeEach(() => {
++      mockWorker = createTrackedWorker();
++      currentMockWorker = mockWorker;
++    });
++
++    afterEach(() => {
++      currentMockWorker = null;
++    });
++
++    async function waitForCamera(fsm: StateMachine<AppState, AppEvent>): Promise<void> {
++      if (fsm.state === AppState.Camera) return;
++      await vi.waitFor(() => {
++        expect(fsm.state).toBe(AppState.Camera);
++      }, { timeout: 2000, interval: 10 });
++    }
++
++    it("Error state terminates worker and capture stops", async () => {
++      const appFsm = createAppStateMachine(createMockContainer());
++      await waitForCamera(appFsm);
++
++      appFsm.dispatch(AppEvent.FATAL_ERROR);
++      expect(appFsm.state).toBe(AppState.Error);
++
++      expect(mockWorker.postMessage).toHaveBeenCalledWith(
++        expect.objectContaining({ type: 'TERMINATE' })
++      );
++    });
++
++    it("Lost state pauses capture but keeps worker alive", async () => {
++      const appFsm = createAppStateMachine(createMockContainer());
++      await waitForCamera(appFsm);
++
++      appFsm.dispatch(AppEvent.STATUE_DETECTED);
++      expect(appFsm.state).toBe(AppState.Tracking);
++
++      appFsm.dispatch(AppEvent.TRACKING_LOST);
++      expect(appFsm.state).toBe(AppState.Lost);
++
++      expect(mockWorker.postMessage).not.toHaveBeenCalledWith(
++        expect.objectContaining({ type: 'TERMINATE' })
++      );
++    });
++
++    it("RETRY from Error re-enters Loading then Camera creates new worker", async () => {
++      workerConstructorCalls = 0;
++      const appFsm = createAppStateMachine(createMockContainer());
++      await waitForCamera(appFsm);
++      expect(workerConstructorCalls).toBe(1);
++
++      appFsm.dispatch(AppEvent.FATAL_ERROR);
++      expect(appFsm.state).toBe(AppState.Error);
++
++      appFsm.dispatch(AppEvent.RETRY);
++      await vi.waitFor(() => {
++        expect(appFsm.state).toBe(AppState.Camera);
++      }, { timeout: 2000, interval: 10 });
++      expect(workerConstructorCalls).toBe(2);
++    });
++  });
+ });
+diff --git a/src/state/states.ts b/src/state/states.ts
+index c91c96f..b33074e 100644
+--- a/src/state/states.ts
++++ b/src/state/states.ts
+@@ -1,5 +1,5 @@
+ import { AppState, AppEvent } from "../types/events";
+-import type { TransitionMap } from "../types/events";
++import type { TransitionMap, WorkerInboundMessage, WorkerOutboundMessage } from "../types/events";
+ import { StateMachine } from "./machine";
+ import type { CameraResult, CameraError } from "../camera/stream";
+ import { requestCameraStreamWithFallback, stopCameraStream, createHiddenVideoElement } from "../camera/stream";
+@@ -9,6 +9,7 @@ import { showPermissionDenied, showCameraError } from "../ui/shared/permission";
+ import { showSplash } from "../ui/splash";
+ import { showLoadingProgress, showDownloadError } from "../ui/loading";
+ import { downloadModel } from "../loader";
++import { FrameCapture } from "../camera/frame";
+ 
+ /** Transition map for the app state machine. */
+ export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
+@@ -44,8 +45,11 @@ export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
+ };
+ 
+ let currentStream: MediaStream | null = null
++let captureVideo: HTMLVideoElement | null = null
+ let sceneContext: SceneContext | null = null
+ let stopRenderLoopFn: (() => void) | null = null
++let frameCapture: FrameCapture | null = null
++let frameWorker: Worker | null = null
+ 
+ export function setSceneContext(ctx: SceneContext): void {
+   sceneContext = ctx
+@@ -103,6 +107,7 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
+ 
+     currentStream = cam.stream;
+     const video = createHiddenVideoElement(cam.stream);
++    captureVideo = video;
+     await video.play();
+     if (sceneContext) {
+       createVideoBackground(sceneContext.scene, video);
+@@ -120,9 +125,33 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
+     if (sceneContext) {
+       container.appendChild(sceneContext.renderer.domElement);
+     }
++    if (captureVideo) {
++      const capture = new FrameCapture(captureVideo);
++      const worker = new Worker(
++        new URL('../worker/index.ts', import.meta.url),
++        { type: 'module' }
++      );
++      worker.onmessage = (event: MessageEvent<WorkerInboundMessage>) => {
++        const msg = event.data;
++        if (msg.type === 'FRAME_ACK') {
++          capture.onFrameAck();
++        }
++      };
++      capture.startWithWorker(worker);
++      frameCapture = capture;
++      frameWorker = worker;
++    }
+   });
+-  fsm.onExit(AppState.Camera, () => {
++  fsm.onExit(AppState.Camera, (next: AppState) => {
+     stopRenderLoopFn?.();
++    if (next === AppState.Tracking) return
++    frameCapture?.stop();
++    frameCapture = null;
++    if (frameWorker) {
++      const terminateMsg: WorkerOutboundMessage = { type: 'TERMINATE' };
++      frameWorker.postMessage(terminateMsg);
++      frameWorker = null;
++    }
+     if (currentStream) {
+       stopCameraStream(currentStream);
+       currentStream = null;
+@@ -137,13 +166,22 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
+   });
+ 
+   fsm.onEnter(AppState.Lost, () => {
+-    // mountLostUI()
++    frameCapture?.stop();
+   });
+   fsm.onExit(AppState.Lost, () => {
+-    // unmountLostUI()
++    if (frameCapture && frameWorker) {
++      frameCapture.startWithWorker(frameWorker);
++    }
+   });
+ 
+   fsm.onEnter(AppState.Error, () => {
++    frameCapture?.stop();
++    if (frameWorker) {
++      const terminateMsg: WorkerOutboundMessage = { type: 'TERMINATE' };
++      frameWorker.postMessage(terminateMsg);
++      frameWorker = null;
++    }
++    frameCapture = null;
+     showDownloadError(container, () => {
+       fsm.dispatch(AppEvent.RETRY);
+     });
+diff --git a/src/types/events.ts b/src/types/events.ts
+index ba963aa..c566a71 100644
+--- a/src/types/events.ts
++++ b/src/types/events.ts
+@@ -62,3 +62,21 @@ export type TransitionMap<S extends string, E extends string> = Record<
+   S,
+   Partial<Record<E, S>>
+ >;
++
++// --- Web Worker Message Types ---
++
++export type RawInferenceOutput = {
++  detected: boolean;
++  confidence: number;
++  bbox?: { x: number; y: number; width: number; height: number };
++};
++
++export type WorkerOutboundMessage =
++  | { type: 'FRAME_DATA'; payload: { frameId: number; width: number; height: number; data: ArrayBuffer } }
++  | { type: 'TERMINATE' };
++
++export type WorkerInboundMessage =
++  | { type: 'WORKER_READY' }
++  | { type: 'FRAME_ACK'; payload: { frameId: number } }
++  | { type: 'INFERENCE_RESULT'; payload: RawInferenceOutput }
++  | { type: 'INFERENCE_ERROR'; payload: { message: string; code: string } };
+diff --git a/src/types/index.ts b/src/types/index.ts
+index 157a1fc..15a4238 100644
+--- a/src/types/index.ts
++++ b/src/types/index.ts
+@@ -1,2 +1,2 @@
+ export { AppState, AppEvent } from "./events";
+-export type { FSMError, TransitionGuard, TransitionMap } from "./events";
++export type { FSMError, TransitionGuard, TransitionMap, RawInferenceOutput, WorkerOutboundMessage, WorkerInboundMessage } from "./events";
