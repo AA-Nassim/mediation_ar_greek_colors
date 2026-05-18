@@ -1,6 +1,11 @@
 import { AppState, AppEvent } from "../types/events";
 import type { TransitionMap } from "../types/events";
 import { StateMachine } from "./machine";
+import type { CameraResult, CameraError } from "../camera/stream";
+import { requestCameraStreamWithFallback, stopCameraStream, createHiddenVideoElement } from "../camera/stream";
+import { createScene, createVideoBackground, startRenderLoop, resizeRenderer } from "../render/scene";
+import type { SceneContext } from "../render/scene";
+import { showPermissionPrompt, showPermissionDenied, showCameraError } from "../ui/shared/permission";
 
 /** Transition map for the app state machine. */
 export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
@@ -35,37 +40,74 @@ export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
   [AppState.Unsupported]: {},
 };
 
+let currentStream: MediaStream | null = null
+let sceneContext: SceneContext | null = null
+let stopRenderLoopFn: (() => void) | null = null
+
+export function setSceneContext(ctx: SceneContext): void {
+  sceneContext = ctx
+}
+
 /**
  * Factory function that creates a configured app state machine.
  * Registers onEnter/onExit callbacks for UI transitions (stubbed)
  * and a default error handler.
  */
-export function createAppStateMachine(): StateMachine<AppState, AppEvent> {
+export function createAppStateMachine(container: HTMLElement): StateMachine<AppState, AppEvent> {
   const fsm = new StateMachine<AppState, AppEvent>(
     AppState.Splash,
     APP_TRANSITIONS
   );
 
-  // Stubbed UI lifecycle hooks — actual implementations deferred to Story 1.3+
   fsm.onEnter(AppState.Splash, () => {
-    // mountSplashUI()
+    showPermissionPrompt(container, () => {
+      fsm.dispatch(AppEvent.RENDERER_READY);
+    });
+  });
+  showPermissionPrompt(container, () => {
+    fsm.dispatch(AppEvent.RENDERER_READY);
   });
   fsm.onExit(AppState.Splash, () => {
-    // unmountSplashUI()
+    container.innerHTML = '';
   });
 
-  fsm.onEnter(AppState.Loading, () => {
-    // mountLoadingUI()
+  fsm.onEnter(AppState.Loading, async () => {
+    container.innerHTML = '';
+    const loadingEl = document.createElement('div');
+    loadingEl.className = 'flex flex-col items-center justify-center h-full gap-4 p-8 text-center';
+    loadingEl.innerHTML = '<p class="text-lg text-gray-500">Preparing AR experience...</p>';
+    container.appendChild(loadingEl);
+
+    const result = await requestCameraStreamWithFallback();
+    if ('stream' in result) {
+      currentStream = result.stream;
+      const video = createHiddenVideoElement(result.stream);
+      await video.play();
+      if (sceneContext) {
+        createVideoBackground(sceneContext.scene, video);
+        stopRenderLoopFn = startRenderLoop(sceneContext, () => {});
+      }
+      fsm.dispatch(AppEvent.MODEL_LOADED);
+    } else {
+      handleCameraError(fsm, container, result);
+    }
   });
   fsm.onExit(AppState.Loading, () => {
     // unmountLoadingUI()
   });
 
   fsm.onEnter(AppState.Camera, () => {
-    // mountCameraUI()
+    container.innerHTML = '';
+    if (sceneContext) {
+      container.appendChild(sceneContext.renderer.domElement);
+    }
   });
   fsm.onExit(AppState.Camera, () => {
-    // unmountCameraUI()
+    stopRenderLoopFn?.();
+    if (currentStream) {
+      stopCameraStream(currentStream);
+      currentStream = null;
+    }
   });
 
   fsm.onEnter(AppState.Tracking, () => {
@@ -101,4 +143,25 @@ export function createAppStateMachine(): StateMachine<AppState, AppEvent> {
   });
 
   return fsm;
+}
+
+function handleCameraError(fsm: StateMachine<AppState, AppEvent>, container: HTMLElement, error: CameraError): void {
+  switch (error.code) {
+    case 'PERMISSION_DENIED':
+      showPermissionDenied(container, () => {
+        fsm.dispatch(AppEvent.RETRY);
+      });
+      break
+    case 'NO_CAMERA':
+      showCameraError(container, 'No camera found on this device. Please use a device with a camera.', () => {
+        fsm.dispatch(AppEvent.RETRY);
+      });
+      break
+    case 'OVERRULED_BY_CONSTRAINTS':
+    case 'UNKNOWN':
+      showCameraError(container, error.message, () => {
+        fsm.dispatch(AppEvent.RETRY);
+      });
+      break
+  }
 }

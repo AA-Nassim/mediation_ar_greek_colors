@@ -154,30 +154,37 @@ describe("StateMachine", () => {
   });
 });
 
+function createMockContainer(): HTMLElement {
+  const el = document.createElement('div')
+  Object.defineProperty(el, 'clientWidth', { value: 375, configurable: true })
+  Object.defineProperty(el, 'clientHeight', { value: 812, configurable: true })
+  return el
+}
+
 describe("AppStateMachine", () => {
   describe("initialization", () => {
     it("initializes in splash state (AC2)", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       expect(appFsm.state).toBe(AppState.Splash);
     });
   });
 
   describe("app transitions", () => {
     it("transitions splash → loading via RENDERER_READY (AC3)", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       expect(appFsm.dispatch(AppEvent.RENDERER_READY)).toBe(true);
       expect(appFsm.state).toBe(AppState.Loading);
     });
 
     it("transitions loading → camera via MODEL_LOADED (AC4)", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.RENDERER_READY);
       expect(appFsm.dispatch(AppEvent.MODEL_LOADED)).toBe(true);
       expect(appFsm.state).toBe(AppState.Camera);
     });
 
     it("transitions camera → tracking via STATUE_DETECTED (AC5)", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.RENDERER_READY);
       appFsm.dispatch(AppEvent.MODEL_LOADED);
       expect(appFsm.dispatch(AppEvent.STATUE_DETECTED)).toBe(true);
@@ -185,7 +192,7 @@ describe("AppStateMachine", () => {
     });
 
     it("transitions tracking → lost via TRACKING_LOST (AC7)", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.RENDERER_READY);
       appFsm.dispatch(AppEvent.MODEL_LOADED);
       appFsm.dispatch(AppEvent.STATUE_DETECTED);
@@ -194,7 +201,7 @@ describe("AppStateMachine", () => {
     });
 
     it("transitions lost → tracking via STATUE_REACQUIRED (AC8)", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.RENDERER_READY);
       appFsm.dispatch(AppEvent.MODEL_LOADED);
       appFsm.dispatch(AppEvent.STATUE_DETECTED);
@@ -216,7 +223,7 @@ describe("AppStateMachine", () => {
     it.each(errorFromStates)(
       "transitions %s → error via FATAL_ERROR",
       (state) => {
-        const appFsm = createAppStateMachine();
+        const appFsm = createAppStateMachine(createMockContainer());
         if (state !== AppState.Splash) {
           appFsm.dispatch(AppEvent.RENDERER_READY);
           appFsm.dispatch(AppEvent.MODEL_LOADED);
@@ -238,7 +245,7 @@ describe("AppStateMachine", () => {
     });
 
     it("transitions to unsupported and stays there", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.UNSUPPORTED);
       expect(appFsm.state).toBe(AppState.Unsupported);
 
@@ -251,7 +258,7 @@ describe("AppStateMachine", () => {
 
   describe("error → splash via RETRY (AC9)", () => {
     it("transitions error → splash via RETRY", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.FATAL_ERROR);
       expect(appFsm.state).toBe(AppState.Error);
 
@@ -263,14 +270,14 @@ describe("AppStateMachine", () => {
 
   describe("onEnter/onExit lifecycle hooks (AC11)", () => {
     it("registers and fires onEnter callbacks for app states", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.RENDERER_READY);
       // Hooks are registered and execute without throwing
       expect(appFsm.state).toBe(AppState.Loading);
     });
 
     it("registers and fires onExit callbacks for app states", () => {
-      const appFsm = createAppStateMachine();
+      const appFsm = createAppStateMachine(createMockContainer());
       appFsm.dispatch(AppEvent.RENDERER_READY);
       appFsm.dispatch(AppEvent.MODEL_LOADED);
       // Hooks are registered and execute without throwing
