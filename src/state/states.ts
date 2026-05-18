@@ -5,7 +5,10 @@ import type { CameraResult, CameraError } from "../camera/stream";
 import { requestCameraStreamWithFallback, stopCameraStream, createHiddenVideoElement } from "../camera/stream";
 import { createScene, createVideoBackground, startRenderLoop, resizeRenderer } from "../render/scene";
 import type { SceneContext } from "../render/scene";
-import { showPermissionPrompt, showPermissionDenied, showCameraError } from "../ui/shared/permission";
+import { showPermissionDenied, showCameraError } from "../ui/shared/permission";
+import { showSplash } from "../ui/splash";
+import { showLoadingProgress, showDownloadError } from "../ui/loading";
+import { downloadModel } from "../loader";
 
 /** Transition map for the app state machine. */
 export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
@@ -35,7 +38,7 @@ export const APP_TRANSITIONS: TransitionMap<AppState, AppEvent> = {
     [AppEvent.UNSUPPORTED]: AppState.Unsupported,
   },
   [AppState.Error]: {
-    [AppEvent.RETRY]: AppState.Splash,
+    [AppEvent.RETRY]: AppState.Loading,
   },
   [AppState.Unsupported]: {},
 };
@@ -46,6 +49,13 @@ let stopRenderLoopFn: (() => void) | null = null
 
 export function setSceneContext(ctx: SceneContext): void {
   sceneContext = ctx
+}
+
+type AsyncResult<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
+const wrap = async <T>(p: Promise<T>): Promise<AsyncResult<T>> => {
+  try { return { ok: true as const, value: await p } }
+  catch (e) { return { ok: false as const, error: e } }
 }
 
 /**
@@ -59,45 +69,54 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
     APP_TRANSITIONS
   );
 
-  fsm.onEnter(AppState.Splash, () => {
-    showPermissionPrompt(container, () => {
-      fsm.dispatch(AppEvent.RENDERER_READY);
-    });
-  });
-  showPermissionPrompt(container, () => {
-    fsm.dispatch(AppEvent.RENDERER_READY);
-  });
+  // Register ALL lifecycle hooks before triggering any transition
+  // Note: Splash has no onEnter — the initial state is bootstrapped explicitly below.
   fsm.onExit(AppState.Splash, () => {
     container.innerHTML = '';
   });
 
   fsm.onEnter(AppState.Loading, async () => {
     container.innerHTML = '';
-    const loadingEl = document.createElement('div');
-    loadingEl.className = 'flex flex-col items-center justify-center h-full gap-4 p-8 text-center';
-    loadingEl.innerHTML = '<p class="text-lg text-gray-500">Preparing AR experience...</p>';
-    container.appendChild(loadingEl);
 
-    const result = await requestCameraStreamWithFallback();
-    if ('stream' in result) {
-      currentStream = result.stream;
-      const video = createHiddenVideoElement(result.stream);
-      await video.play();
-      if (sceneContext) {
-        createVideoBackground(sceneContext.scene, video);
-        stopRenderLoopFn = startRenderLoop(sceneContext, () => {});
-      }
-      fsm.dispatch(AppEvent.MODEL_LOADED);
-    } else {
-      handleCameraError(fsm, container, result);
+    const updateProgress = showLoadingProgress(container);
+
+    const [modelResult, camResult] = await Promise.all([
+      wrap(downloadModel(updateProgress)),
+      wrap(requestCameraStreamWithFallback()),
+    ]);
+
+    if (modelResult.ok === false) {
+      fsm.dispatch(AppEvent.FATAL_ERROR);
+      return;
     }
+
+    if (camResult.ok === false) {
+      handleCameraError(fsm, container, camResult.error as CameraError);
+      return;
+    }
+
+    const cam = camResult.value;
+    if (!('stream' in cam)) {
+      handleCameraError(fsm, container, cam);
+      return;
+    }
+
+    currentStream = cam.stream;
+    const video = createHiddenVideoElement(cam.stream);
+    await video.play();
+    if (sceneContext) {
+      createVideoBackground(sceneContext.scene, video);
+      stopRenderLoopFn = startRenderLoop(sceneContext, () => {});
+    }
+    fsm.dispatch(AppEvent.MODEL_LOADED);
   });
   fsm.onExit(AppState.Loading, () => {
-    // unmountLoadingUI()
+    container.classList.add('opacity-0', 'transition-opacity', 'duration-500', 'ease-out');
   });
 
   fsm.onEnter(AppState.Camera, () => {
     container.innerHTML = '';
+    container.classList.remove('opacity-0', 'transition-opacity', 'duration-500', 'ease-out');
     if (sceneContext) {
       container.appendChild(sceneContext.renderer.domElement);
     }
@@ -125,7 +144,9 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
   });
 
   fsm.onEnter(AppState.Error, () => {
-    // mountErrorUI()
+    showDownloadError(container, () => {
+      fsm.dispatch(AppEvent.RETRY);
+    });
   });
   fsm.onExit(AppState.Error, () => {
     // unmountErrorUI()
@@ -141,6 +162,12 @@ export function createAppStateMachine(container: HTMLElement): StateMachine<AppS
   fsm.setErrorHandler((error) => {
     console.error(`FSM Error [${error.code}]: ${error.message}`);
   });
+
+  // Bootstrap: FSM constructor doesn't call onEnter, so show splash and
+  // dispatch RENDERER_READY explicitly. Initial state effects are handled
+  // right here rather than in a never-reached onEnter(Splash) hook.
+  showSplash(container);
+  fsm.dispatch(AppEvent.RENDERER_READY);
 
   return fsm;
 }
