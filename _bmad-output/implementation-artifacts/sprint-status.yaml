@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-05-16T13:17:42.037+02:00
-last_updated: 2026-05-17T18:00:00.000+02:00
+last_updated: 2026-05-17T19:00:00.000+02:00
 project: mediation_ar_greek_colors
 project_key: NOKEY
 tracking_system: file-system
@@ -44,7 +44,7 @@ story_location: _bmad-output/implementation-artifacts
 development_status:
   epic-1: backlog
   1-1-project-scaffold-build-configuration: done
-  1-2-typed-state-machine-app-orchestration: backlog
+  1-2-typed-state-machine-app-orchestration: review
   1-3-camera-permission-live-preview-camera-feed-scene-background: backlog
   1-4-splash-screen-threejs-boot-model-download-progress: backlog
   1-5-responsive-frame-capture-pipeline: backlog
