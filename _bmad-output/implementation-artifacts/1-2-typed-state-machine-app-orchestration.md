@@ -1,6 +1,6 @@
 # Story 1.2: Typed State Machine & App Orchestration
 
-Status: review
+Status: done
 
 ## Story
 
