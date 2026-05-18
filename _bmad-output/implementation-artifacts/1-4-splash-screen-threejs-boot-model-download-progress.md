@@ -1,7 +1,7 @@
 # Story 1.4: Splash Screen & Three.js Boot with Model Download Progress
 
 Change Log: 2026-05-18 — Implemented Story 1.4: splash screen, loading progress bar, model download with ReadableStream, Error state with retry. All 11 tasks complete, 59/59 tests passing.
-Status: review
+Status: done
 
 ## Story
 
