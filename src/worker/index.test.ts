@@ -43,7 +43,7 @@ describe('Web Worker', () => {
 
     const handler = createWorkerHandler(scope)
 
-    handler({ data: { type: 'UNKNOWN_TYPE' } } as MessageEvent<WorkerOutboundMessage>)
+    handler({ data: { type: 'UNKNOWN_TYPE' } } as unknown as MessageEvent<WorkerOutboundMessage>)
 
     expect(consoleSpy).toHaveBeenCalled()
     consoleSpy.mockRestore()

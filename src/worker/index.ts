@@ -31,9 +31,10 @@ export function createWorkerHandler(scope: WorkerScope = self as unknown as Work
   }
 }
 
-const isWorkerScope = typeof self !== 'undefined' && typeof (self as Record<string, unknown>).document === 'undefined'
+const isWorkerScope = typeof self !== 'undefined' && typeof (self as unknown as Record<string, unknown>).document === 'undefined'
 if (isWorkerScope) {
-  self.onmessage = createWorkerHandler()
+  const handler = createWorkerHandler()
+  self.onmessage = handler as unknown as ((ev: MessageEvent) => void)
   const readyMsg: WorkerInboundMessage = { type: 'WORKER_READY' }
   self.postMessage(readyMsg)
 }

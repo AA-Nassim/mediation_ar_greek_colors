@@ -76,7 +76,7 @@ describe('FrameCapture', () => {
     vi.advanceTimersByTime(FRAME_CAPTURE_INTERVAL_MS)
 
     expect(worker.postMessage).toHaveBeenCalledTimes(1)
-    const call = vi.mocked(worker.postMessage).mock.calls[0]
+    const call = vi.mocked(worker.postMessage).mock.calls[0]!
     const msg = call[0] as WorkerOutboundMessage
     expect(msg.type).toBe('FRAME_DATA')
   })
@@ -87,7 +87,7 @@ describe('FrameCapture', () => {
 
     vi.advanceTimersByTime(FRAME_CAPTURE_INTERVAL_MS)
 
-    const call = vi.mocked(worker.postMessage).mock.calls[0]
+    const call = vi.mocked(worker.postMessage).mock.calls[0]!
     const transferList = call[1] as unknown[]
     expect(transferList).toBeDefined()
     expect(transferList.length).toBe(1)
@@ -100,7 +100,7 @@ describe('FrameCapture', () => {
 
     vi.advanceTimersByTime(FRAME_CAPTURE_INTERVAL_MS)
 
-    const call = vi.mocked(worker.postMessage).mock.calls[0]
+    const call = vi.mocked(worker.postMessage).mock.calls[0]!
     const msg = call[0] as WorkerOutboundMessage
     if (msg.type === 'FRAME_DATA') {
       expect(msg.payload.data.byteLength).toBe(0)
